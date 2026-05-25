@@ -23,28 +23,80 @@ ACTIVATION_COLUMNS = [
 OUTPUT_COLUMNS = ACTIVATION_COLUMNS + ["Compensation", "Rebate", "Chargeback"]
 
 
-def _read_csv(path: str, encoding: str = "latin1") -> pd.DataFrame:
-    logger.debug("Reading CSV: %s (encoding=%s)", path, encoding)
+# def _read_csv(path: str, encoding: str = "latin1") -> pd.DataFrame:
+#     logger.debug("Reading CSV: %s (encoding=%s)", path, encoding)
+#     try:
+#         df = pd.read_csv(path, encoding=encoding)
+#         logger.info("Read %s: %d rows, %d columns", path, len(df), len(df.columns))
+#         return df
+#     except UnicodeDecodeError:
+#         logger.warning("UnicodeDecodeError for %s; detecting encoding with chardet", path)
+#         import chardet
+
+#         with open(path, "rb") as f:
+#             detected = chardet.detect(f.read())
+
+#         fallback = detected.get("encoding") or encoding
+#         logger.info("Retrying %s with encoding=%s", path, fallback)
+
+#         df = pd.read_csv(path, encoding=fallback)
+#         logger.info("Read %s: %d rows after fallback encoding", path, len(df))
+#         return df
+
+#     except Exception as exc:
+#         logger.exception("Failed to read CSV: %s", path)
+#         raise_custom(exc)
+
+def _read_file(path: str, encoding: str = "latin1") -> pd.DataFrame:
+    logger.debug("Reading file: %s", path)
+
     try:
-        df = pd.read_csv(path, encoding=encoding)
-        logger.info("Read %s: %d rows, %d columns", path, len(df), len(df.columns))
-        return df
-    except UnicodeDecodeError:
-        logger.warning("UnicodeDecodeError for %s; detecting encoding with chardet", path)
-        import chardet
+        ext = os.path.splitext(path)[1].lower()
 
-        with open(path, "rb") as f:
-            detected = chardet.detect(f.read())
+        # CSV files
+        if ext == ".csv":
+            try:
+                df = pd.read_csv(path, encoding=encoding)
 
-        fallback = detected.get("encoding") or encoding
-        logger.info("Retrying %s with encoding=%s", path, fallback)
+            except UnicodeDecodeError:
+                logger.warning(
+                    "UnicodeDecodeError for %s; detecting encoding with chardet",
+                    path,
+                )
 
-        df = pd.read_csv(path, encoding=fallback)
-        logger.info("Read %s: %d rows after fallback encoding", path, len(df))
+                import chardet
+
+                with open(path, "rb") as f:
+                    detected = chardet.detect(f.read())
+
+                fallback = detected.get("encoding") or encoding
+
+                logger.info(
+                    "Retrying %s with encoding=%s",
+                    path,
+                    fallback,
+                )
+
+                df = pd.read_csv(path, encoding=fallback)
+
+        # Excel files (.xls / .xlsx)
+        elif ext in [".xls", ".xlsx"]:
+            df = pd.read_excel(path)
+
+        else:
+            raise ValueError(f"Unsupported file type: {ext}")
+
+        logger.info(
+            "Read %s: %d rows, %d columns",
+            path,
+            len(df),
+            len(df.columns),
+        )
+
         return df
 
     except Exception as exc:
-        logger.exception("Failed to read CSV: %s", path)
+        logger.exception("Failed to read file: %s", path)
         raise_custom(exc)
 
 
