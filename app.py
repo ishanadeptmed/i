@@ -190,9 +190,9 @@ def page_upload() -> None:
 
     paths = raw_paths(year, month)
 
-    activation = st.file_uploader("Activation Detail Report", type=["csv"])
-    cur_callidus = st.file_uploader("curCallidus Report", type=["csv"])
-    callidus_detail = st.file_uploader("Callidus Detail Report", type=["csv"])
+    activation = st.file_uploader("Activation Detail Report(activation)", type=["csv"])
+    cur_callidus = st.file_uploader("Compensation Detail Report(curCallidus)", type=["xls"])
+    callidus_detail = st.file_uploader("Rebate Detail Report(Callidus)", type=["csv"])
 
     if st.button("Save uploaded files"):
         try:
