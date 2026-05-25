@@ -1,0 +1,769 @@
+================================================================================
+  METRO EARNINGS APP — CODE FLOW & DATA TRANSFORMATION GUIDE
+================================================================================
+
+Project root: d:\i  (or wherever you cloned the repo)
+Entry command:  streamlit run streamlit_app.py
+
+This document explains:
+  - Which file reads/writes what
+  - How CSV data is transformed step by step
+  - Where results are stored on disk
+  - How auth, UI, logging, and errors connect
+
+Reference notebook (original logic): notebook/ingestion.ipynb
+
+================================================================================
+  TABLE OF CONTENTS
+================================================================================
+
+  1. High-level architecture
+  2. Repository file map
+  3. Disk layout (folders and files)
+  4. Application startup sequence
+  5. Authentication flow
+  6. Streamlit UI pages and session state
+  7. Upload and save flow (raw CSVs)
+  8. Processing flow (ingestion pipeline)
+  9. Data transformation detail (CSV -> merged output)
+  10. Processed outputs (what gets written)
+  11. Preview and download flow
+  12. Dashboard flow
+  13. Logout and cleanup
+  14. Logging and exception handling
+  15. Troubleshooting (zero records, missing files)
+  16. Quick reference: function call chain
+
+================================================================================
+  1. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+  +------------------+     +------------------+     +------------------+
+  |   streamlit_app  |---->|  services/auth   |---->| data/users.json  |
+  |   (UI layer)     |     |  (signup/login)  |     |  (local JSON)    |
+  +--------+---------+     +------------------+     +------------------+
+           |
+           |  upload / process / preview / dashboard
+           v
+  +------------------+     +----------------------+     +------------------+
+  |  services/files  |---->| services/ingestion   |---->| uploads/processed|
+  |  (disk I/O)      |     | (pandas pipeline)    |     | YYYY-MM/*.csv    |
+  +--------+---------+     +----------------------+     +------------------+
+           |
+           v
+  +------------------+     +------------------+
+  | uploads/raw      |     | logs/*.log       |
+  | YYYY-MM/*.csv    |     | Drug_EDA logger  |
+  +------------------+     +------------------+
+
+ASCII — end-to-end user journey:
+
+    [Browser]
+        |
+        v
+    streamlit_app.py  --------->  services/bootstrap.py  (init logging)
+        |                              |
+        |                              v
+        |                         src/Drug_EDA/logger.py
+        |
+        +-- Login tab --> services/auth.py --> data/users.json
+        |
+        +-- Upload tab --> services/files.py --> uploads/raw/YYYY-MM/
+        |                      |
+        |                      v
+        +-- Process button --> services/ingestion.py (run_ingestion)
+        |                      |
+        |                      v
+        +-- Preview/Dashboard --> reads uploads/processed/YYYY-MM/
+        |
+        +-- Logout --> cleanup_on_logout() (keeps processed/)
+
+================================================================================
+  2. REPOSITORY FILE MAP
+================================================================================
+
+  FILE                          | ROLE
+  ------------------------------|--------------------------------------------
+  streamlit_app.py              | Main UI: login, upload, preview, dashboard
+  config.py                     | Paths, filenames, env (BASE_DIR, folders)
+  services/bootstrap.py         | Adds src/ to sys.path; starts logging once
+  services/auth.py              | Owner/manager CRUD in data/users.json
+  services/files.py             | Save uploads, process_period, load outputs
+  services/ingestion.py           | Pandas merge (ported from ingestion.ipynb)
+  services/__init__.py          | Empty package marker
+  src/Drug_EDA/logger.py        | File + console logging to logs/
+  src/Drug_EDA/exception.py     | customexception, raise_custom, format_error
+  src/Drug_EDA/__init__.py      | Re-exports logger/exception helpers
+  data/users.json               | Runtime user store (gitignored)
+  data/.gitkeep                 | Keeps data/ in git
+  notebook/ingestion.ipynb      | Original exploratory pipeline (reference)
+  requirements.txt              | streamlit, pandas, chardet, etc.
+  docs/CODE_FLOW.txt            | This document
+
+  NOT USED BY STREAMLIT (legacy / sample):
+  - metro/*.csv                 | Sample data only
+  - uploads/clean/              | Defined in config; not used in current flow
+
+================================================================================
+  3. DISK LAYOUT (FOLDERS AND FILES)
+================================================================================
+
+  d:\i\
+  |
+  +-- config.py
+  +-- streamlit_app.py
+  |
+  +-- data/
+  |     users.json              <-- Auth: owners + managers (password hashes)
+  |
+  +-- services/
+  |     bootstrap.py
+  |     auth.py
+  |     files.py
+  |     ingestion.py
+  |
+  +-- src/Drug_EDA/
+  |     logger.py
+  |     exception.py
+  |
+  +-- uploads/
+  |     raw/
+  |       YYYY-MM/              <-- e.g. 2024-02, 2026-05
+  |         ActivationDetailReport.csv
+  |         curCallidus.csv
+  |         CallidusDetail.csv
+  |     processed/
+  |       YYYY-MM/
+  |         merged_activations.csv
+  |         summary.json
+  |         manifest.json
+  |     clean/                    (reserved; unused in current pipeline)
+  |
+  +-- logs/
+  |     MM_DD_YYYY_HH_MM_SS.log   <-- New log file each app process start
+  |
+  +-- notebook/
+        ingestion.ipynb
+
+  Period folder name format: YYYY-MM  (from period_key(year, month) in files.py)
+
+================================================================================
+  4. APPLICATION STARTUP SEQUENCE
+================================================================================
+
+  Step 1: User runs
+           streamlit run streamlit_app.py
+
+  Step 2: Python loads streamlit_app.py
+           First meaningful import:
+             import services.bootstrap   # noqa: F401 (side effect)
+
+  Step 3: services/bootstrap.py
+           - Inserts d:\i\src into sys.path
+           - Calls Drug_EDA.logger.setup_logging()
+           - Creates logs/<timestamp>.log
+           - Configures root logger: DEBUG to file, INFO to console
+
+  Step 4: streamlit_app.py continues
+           - from Drug_EDA.exception import customexception, format_error
+           - from services.bootstrap import LOG_FILEPATH, get_logger
+           - logger = get_logger("streamlit_app")
+           - st.set_page_config(...)
+           - main() -> init_session() -> sidebar_nav() -> page_*()
+
+  Step 5: config.py (imported by auth/files as needed)
+           - load_dotenv() for optional .env
+           - BASE_DIR = directory containing config.py
+           - Defines RAW_FOLDER, PROCESSED_FOLDER, USERS_FILE, filenames
+
+  LOG FILE PATH: exposed as LOG_FILEPATH in sidebar "Activity log" expander
+
+================================================================================
+  5. AUTHENTICATION FLOW
+================================================================================
+
+  DATA STORE: data/users.json
+
+  Structure:
+  {
+    "owners": [
+      {
+        "email": "owner@example.com",
+        "password_hash": "<salt_hex>:<digest_hex>",
+        "store_ids": ["C-70812973", "C-12345678"],
+        "manager_emails": ["mgr@example.com"]
+      }
+    ],
+    "managers": [
+      {
+        "email": "mgr@example.com",
+        "password_hash": "<salt_hex>:<digest_hex>",
+        "owner_email": "owner@example.com"
+      }
+    ]
+  }
+
+  Password hashing: PBKDF2-HMAC-SHA256, 260000 iterations (services/auth.py)
+
+  --- Owner signup (UI tab: Store owner signup) ---
+
+    streamlit_app.page_login()
+      -> auth.signup_owner(email, password, store_ids_str, manager_emails_str)
+           -> _parse_list_field() splits comma-separated IDs/emails
+           -> load_users() reads JSON
+           -> append to data["owners"]
+           -> save_users() writes JSON
+           -> returns (True, "Owner account created.") or (False, error message)
+
+  --- Manager signup (UI tab: Store manager signup) ---
+
+    auth.signup_manager(email, password)
+      -> is_manager_whitelisted(email) scans all owners' manager_emails
+      -> if not listed: (False, "Email is not whitelisted...")
+      -> else append to data["managers"] with owner_email link
+      -> save_users()
+
+  --- Manager login (UI tab: Store manager login) ---
+
+    auth.login_manager(email, password)
+      -> find manager in data["managers"]
+      -> _verify_password()
+      -> load linked owner record
+      -> build session dict:
+           {
+             "role": "manager",
+             "email": "<manager email>",
+             "owner_email": "<owner email>",
+             "store_ids": <owner's store_ids list>
+           }
+      -> streamlit_app.set_manager_session(session)
+           sets st.session_state.authenticated = True
+           sets st.session_state.store_ids  <-- USED BY INGESTION FILTER
+
+  ASCII — auth flow:
+
+    Owner Signup
+    ------------
+    [Form: email, password, store IDs, manager emails]
+              |
+              v
+         signup_owner()
+              |
+              v
+         data/users.json  (owners[])
+
+    Manager Signup
+    --------------
+    [Form: email, password]
+              |
+              v
+    is_manager_whitelisted? ----no----> error message
+              |
+             yes
+              v
+         signup_manager() --> users.json (managers[])
+
+    Manager Login
+    -------------
+    [Form: email, password]
+              |
+              v
+         login_manager()
+              |
+              v
+    st.session_state: authenticated, email, owner_email, store_ids
+              |
+              v
+         Upload / Preview / Dashboard pages unlocked
+
+================================================================================
+  6. STREAMLIT UI PAGES AND SESSION STATE
+================================================================================
+
+  FILE: streamlit_app.py
+
+  SESSION KEYS (defaults in SESSION_DEFAULTS):
+    authenticated   bool   False until manager logs in
+    role            str    "manager" when logged in
+    email           str    manager email
+    owner_email     str    linked owner
+    store_ids       list   from owner record — CRITICAL for row filter
+    page            str    "upload" | "preview" | "dashboard"
+
+  PAGE ROUTING (after login):
+    sidebar radio -> st.session_state.page
+    main() dispatches:
+      page == "upload"     -> page_upload()
+      page == "preview"    -> page_preview()
+      page == "dashboard"  -> page_dashboard()
+
+  GUARD: require_manager() checks authenticated AND role == "manager"
+         If false -> only page_login() shown
+
+  SIDEBAR (logged in):
+    - Activity log expander (tail_log_file(LOG_FILEPATH))
+    - Navigation radio
+    - Logout button -> logout() -> cleanup_on_logout() + clear session
+
+================================================================================
+  7. UPLOAD AND SAVE FLOW (RAW CSVs)
+================================================================================
+
+  UI: page_upload() in streamlit_app.py
+
+  User selects:
+    - Year (dropdown)
+    - Month (dropdown)
+    - Three st.file_uploader widgets:
+        1. Activation Detail Report
+        2. curCallidus Report
+        3. Callidus Detail Report
+
+  Period key: period_key(year, month) -> "YYYY-MM"  e.g. "2024-02"
+
+  Target paths (from services/files.py raw_paths()):
+    uploads/raw/YYYY-MM/ActivationDetailReport.csv
+    uploads/raw/YYYY-MM/curCallidus.csv
+    uploads/raw/YYYY-MM/CallidusDetail.csv
+
+  Button: "Save uploaded files"
+    For each non-None upload:
+      save_uploaded_file(uploaded_file, dest_path)
+        - os.makedirs(parent dir)
+        - writes uploaded_file.getbuffer() to disk
+        - logs byte size
+
+  Button: "Process files"  (see section 8 — does NOT require re-upload if
+                             files already saved)
+
+  IMPORTANT: Process checks that all THREE files exist on disk. If you click
+  Process before Save, you get:
+    "Missing raw files for YYYY-MM: upload all three CSVs first."
+
+  ASCII — upload save:
+
+    [Streamlit file_uploader buffers in memory]
+              |
+              |  "Save uploaded files"
+              v
+    save_uploaded_file()  x3
+              |
+              v
+    uploads/raw/2024-02/
+      ActivationDetailReport.csv
+      curCallidus.csv
+      CallidusDetail.csv
+
+================================================================================
+  8. PROCESSING FLOW (INGESTION PIPELINE)
+================================================================================
+
+  Trigger: "Process files" on Upload page
+
+  streamlit_app.page_upload()
+    -> process_period(year, month, st.session_state.email, st.session_state.store_ids)
+         FILE: services/files.py
+
+  process_period() steps:
+
+    1. pk = period_key(year, month)
+    2. paths = raw_paths(year, month)
+    3. If any path missing -> return (False, "Missing raw files...")
+    4. df = run_ingestion(
+             paths["activation"],
+             paths["cur_callidus"],
+             paths["callidus_detail"],
+             store_ids=store_ids   # from login session
+           )
+    5. out_dir = processed_period_dir(year, month)
+    6. df.to_csv(.../merged_activations.csv)
+    7. summary = build_summary(df, year, month, manager_email)
+    8. Write summary.json, manifest.json
+    9. return (True, "Processed N activations for YYYY-MM.")
+
+  ASCII — process flow:
+
+    uploads/raw/YYYY-MM/*.csv
+              |
+              |  process_period()
+              v
+    run_ingestion()  <-- services/ingestion.py
+              |
+              |  DataFrame (0 to N rows)
+              v
+    build_summary()
+              |
+              v
+    uploads/processed/YYYY-MM/
+      merged_activations.csv
+      summary.json
+      manifest.json
+
+================================================================================
+  9. DATA TRANSFORMATION DETAIL (CSV -> MERGED OUTPUT)
+================================================================================
+
+  FUNCTION: run_ingestion() in services/ingestion.py
+  SOURCE: notebook/ingestion.ipynb (same logic, parameterized paths)
+
+  THREE INPUT FILES:
+  ------------------
+
+  (A) ActivationDetailReport.csv
+      Typical columns used: storeid, company, serial, accounttype,
+                          plancode, plantype1
+      (Full file has ~32 columns; pipeline keeps 6.)
+
+  (B) curCallidus.csv
+      Used for: chargeback detection only
+      Key columns: esn, transaction_type_desc
+
+  (C) CallidusDetail.csv
+      Used for: Compensation amounts
+      Key columns: esn, transaction_amount
+
+  NOTE: curCallidus transaction_amount sums are explored in the notebook but
+  the production pipeline sets Compensation from CallidusDetail ONLY
+  (matching notebook cells that overwrite with CallidusReport map).
+
+  TRANSFORMATION STEPS (in order):
+  --------------------------------
+
+  Step | Input              | Operation
+  -----|--------------------|------------------------------------------
+   1   | Activation CSV     | pd.read_csv(encoding='latin1')
+       |                    | chardet fallback if UnicodeDecodeError
+   2   | Activation DF      | Keep columns:
+       |                    |   storeid, company, serial, accounttype,
+       |                    |   plancode, plantype1
+       |                    | Variable: useful (DataFrame)
+   3   | useful               | Filter: plantype1 == "Voice"
+       |                    | Drops non-Voice rows (e.g. Feature lines)
+       |                    | Log: "Filtered Voice rows: X -> Y"
+   4   | useful.serial        | astype(str), remove non-digits regex \D
+       |                    | cast to int (ESN/serial alignment)
+   5   | curCallidus          | Rows where transaction_type_desc
+       |                    |   .str.contains("charge", case=False)
+       |                    | Normalize esn column (_normalize_esn)
+       |                    | Build dict: esn -> transaction_type_desc
+       |                    | Name: chargeback_dict
+   6   | CallidusDetail       | Normalize esn
+       |                    | compensation_map = esn -> transaction_amount
+   7   | useful               | Compensation = serial.map(compensation_map)
+       |                    |   .fillna(0.00).round(2)
+   8   | useful               | Chargeback = serial.map(chargeback_dict)
+       |                    |   (NaN if not a chargeback ESN)
+   9   | useful               | If store_ids provided (from auth session):
+       |                    |   useful = useful[useful.storeid.isin(store_ids)]
+       |                    | Log: "Store filter [...]: before -> after rows"
+  10   | useful               | Return columns:
+       |                    |   storeid, company, serial, accounttype,
+       |                    |   plancode, plantype1, Compensation, Chargeback
+
+  JOIN KEY: Activation.serial (int) <-> Callidus/curCallidus.esn (normalized int)
+
+  ASCII — data transformation diagram:
+
+    +---------------------------+
+    | ActivationDetailReport    |
+    | .csv                      |
+    +------------+--------------+
+                 |
+                 |  keep 6 cols, Voice only, clean serial
+                 v
+            +----+----+
+            | useful  |------------------+
+            +----+----+                  |
+                 |                       |
+    +------------+-----------+           |
+    | curCallidus.csv        |           |
+    | (charge in desc)       |           |
+    +------------+-----------+           |
+                 |                       |
+                 v                       v
+         chargeback_dict          map Compensation
+                 |                 from CallidusDetail
+                 |                       |
+                 +---------> map Chargeback
+                             |
+                             v
+                      +------+------+
+                      | store filter |  <-- store_ids from users.json
+                      +------+------+
+                             |
+                             v
+                   merged_activations.csv
+
+  Mermaid-style flow (for viewers that render Mermaid; ASCII above is canonical):
+
+    flowchart LR
+      subgraph inputs [Raw CSVs]
+        A[ActivationDetailReport.csv]
+        C[curCallidus.csv]
+        D[CallidusDetail.csv]
+      end
+      subgraph pipeline [run_ingestion]
+        V[Filter Voice]
+        S[Normalize serial]
+        CB[chargeback_dict]
+        COMP[Compensation map]
+        CH[Chargeback map]
+        SF[Store filter]
+      end
+      subgraph outputs [Processed]
+        M[merged_activations.csv]
+        J[summary.json]
+      end
+      A --> V --> S
+      C --> CB
+      D --> COMP
+      S --> COMP
+      S --> CH
+      CB --> CH
+      COMP --> SF --> M
+      SF --> J
+
+  OUTPUT COLUMN TYPES (final merged_activations.csv):
+  ---------------------------------------------------
+  storeid       string   e.g. C-70812973
+  company       string
+  serial        int64    device ESN
+  accounttype   string
+  plancode      string
+  plantype1     string   always Voice at this stage
+  Compensation  float64  dollars, 0.00 if no match in CallidusDetail
+  Chargeback    string   nullable; description if chargeback ESN
+
+================================================================================
+  10. PROCESSED OUTPUTS (WHAT GETS WRITTEN)
+================================================================================
+
+  DIRECTORY: uploads/processed/YYYY-MM/
+
+  (1) merged_activations.csv
+      - Full output of run_ingestion()
+      - One row per Voice activation after store filter
+      - Used by Preview (dataframe) and Dashboard (charts)
+
+  (2) summary.json
+      Built by build_summary() in services/ingestion.py
+      Fields:
+        year                  int
+        month                 int
+        manager_email         str
+        total_compensation    float  sum(Compensation)
+        activation_count      int    row count
+        chargeback_count      int    rows where Chargeback is not null
+        by_store              list   [{storeid, Compensation}, ...]
+        processed_at          ISO timestamp (added in files.py)
+
+  (3) manifest.json
+      Built in process_period()
+      Fields:
+        period              "YYYY-MM"
+        raw_files           {activation, cur_callidus, callidus_detail: basename}
+        processed_files     [merged_activations.csv, summary.json]
+
+================================================================================
+  11. PREVIEW AND DOWNLOAD FLOW
+================================================================================
+
+  UI: page_preview() in streamlit_app.py
+
+  1. list_available_periods()
+       Scans uploads/raw/ and uploads/processed/ for YYYY-MM folders
+       Returns sorted list (newest first)
+
+  2. User picks period from selectbox
+
+  3. list_period_files(period)
+       Returns [(label, absolute_path), ...]
+       Labels like "raw/ActivationDetailReport.csv", "processed/summary.json"
+
+  4. Download buttons: read_file_bytes(path) -> st.download_button
+
+  5. Raw previews: pd.read_csv(path, nrows=200) for each raw/*.csv
+
+  6. Processed preview: load_merged_csv(period) -> head(200)
+
+  7. Summary: load_summary(period) -> st.json()
+
+  READ PATH (no transformation on preview — disk -> memory -> UI):
+
+    disk CSV/JSON  -->  pandas or bytes  -->  Streamlit widget
+
+================================================================================
+  12. DASHBOARD FLOW
+================================================================================
+
+  UI: page_dashboard() in streamlit_app.py
+
+  1. list_available_periods()
+  2. Filter to periods where load_summary(p) is not None
+  3. User selects period
+  4. load_summary(period) -> KPI metrics:
+       Total compensation, Activations, Chargebacks
+  5. load_merged_csv(period) -> if non-empty:
+       - groupby storeid, sum Compensation -> bar chart
+       - nlargest(20, Compensation) -> table
+     else fallback to summary["by_store"] for bar chart only
+
+  DATA SOURCE: Only uploads/processed/ (not raw CSVs recomputed)
+
+================================================================================
+  13. LOGOUT AND CLEANUP
+================================================================================
+
+  UI: Sidebar "Logout" button
+
+  streamlit_app.logout():
+    1. cleanup_on_logout() in services/files.py
+    2. Delete all children of uploads/ EXCEPT folder named "processed"
+       - Removes uploads/raw/ entirely
+       - Removes any other files/folders under uploads/
+    3. Recreate empty uploads/raw/
+    4. Clear all st.session_state keys
+    5. init_session() -> back to login screen
+
+  NOT DELETED on logout:
+    - data/users.json
+    - uploads/processed/**  (historical monthly results preserved)
+    - logs/*.log
+
+================================================================================
+  14. LOGGING AND EXCEPTION HANDLING
+================================================================================
+
+  LOGGER: src/Drug_EDA/logger.py
+    - Log directory: d:\i\logs\
+    - New file per process: MM_DD_YYYY_HH_MM_SS.log
+    - Format: [asctime] lineno name - LEVEL - message
+    - get_logger("module.name") used in each service
+
+  EXCEPTIONS: src/Drug_EDA/exception.py
+    customexception  — wraps error with file name + line number
+    raise_custom(e)  — raise customexception from any Exception
+    format_error(e)  — string for UI when not using customexception
+
+  FLOW ON ERROR:
+    services layer logs logger.exception(...)
+    Either returns (False, format_error) to UI
+    Or raise_custom -> caught in streamlit as st.error(str(exc))
+
+  USEFUL LOG LINES:
+    INFO  - Manager login success: ... stores=['...']
+    INFO  - Read <path>: N rows, M columns
+    INFO  - Filtered Voice rows: X -> Y
+    INFO  - Store filter ['ID']: X -> Y rows    <-- Y=0 means store ID mismatch
+    INFO  - Ingestion complete: rows=N ...
+    WARNING - Missing raw files for ...
+    ERROR - Failed to read CSV / Processing failed (with traceback)
+
+  UI LOG PANEL: sidebar "Activity log (this session)" -> tail_log_file()
+
+================================================================================
+  15. TROUBLESHOOTING
+================================================================================
+
+  PROBLEM: Zero records / zero compensation after Process
+  -------------------------------------------------------
+  CAUSE (most common): Store ID filter removed all rows.
+
+  Log pattern:
+    INFO - Filtered Voice rows: 338 -> 220
+    INFO - Store filter ['PARIS123']: 220 -> 0 rows
+    INFO - Ingestion complete: rows=0 total_compensation=0.00
+
+  Fix:
+    - Open ActivationDetailReport.csv and note actual storeid values
+      (often format like C-70812973, not arbitrary placeholders).
+    - Update data/users.json owner store_ids to match exactly, OR
+      re-register owner with correct comma-separated store IDs.
+    - Re-upload CSVs and Process again.
+
+  PROBLEM: "Missing raw files" when clicking Process
+  --------------------------------------------------
+  CAUSE: Files not saved to disk yet.
+  Fix: Select three CSVs, click "Save uploaded files", then "Process files".
+
+  PROBLEM: Empty dashboard for a period folder
+  ------------------------------------------
+  CAUSE: summary.json missing or process never succeeded.
+  Fix: Run Process on Upload page for that month/year.
+
+  PROBLEM: Raw files gone but processed remains
+  ---------------------------------------------
+  CAUSE: Logout deletes uploads/raw/ by design.
+  Fix: Re-upload if you need raw previews again; processed data kept.
+
+  PROBLEM: FileNotFoundError for old flat paths (e.g. ActivationDetailReport_7GT0TN4BG.csv)
+  -----------------------------------------------------------------------------------------
+  CAUSE: Notebook/sample paths at uploads/raw/ root; app uses uploads/raw/YYYY-MM/ names.
+  Fix: Use Streamlit upload flow with standard filenames in month folder.
+
+================================================================================
+  16. QUICK REFERENCE: FUNCTION CALL CHAIN
+================================================================================
+
+  STARTUP
+  -------
+  streamlit run streamlit_app.py
+    -> import services.bootstrap
+         -> setup_logging()
+    -> main()
+
+  OWNER SIGNUP
+  ------------
+  page_login [owner form]
+    -> auth.signup_owner
+         -> load_users / save_users
+
+  MANAGER LOGIN
+  -------------
+  page_login [login form]
+    -> auth.login_manager
+         -> set_manager_session
+
+  SAVE UPLOADS
+  ------------
+  page_upload [Save button]
+    -> raw_paths(year, month)
+    -> save_uploaded_file (x3)
+
+  PROCESS
+  -------
+  page_upload [Process button]
+    -> process_period
+         -> run_ingestion
+              -> _read_csv (x3)
+              -> filter Voice, serial cleanup
+              -> chargeback_dict from curCallidus
+              -> Compensation from CallidusDetail
+              -> store filter
+         -> build_summary
+         -> to_csv merged_activations.csv
+         -> write summary.json, manifest.json
+
+  PREVIEW
+  -------
+  page_preview
+    -> list_available_periods
+    -> list_period_files
+    -> read_file_bytes / load_merged_csv / load_summary
+
+  DASHBOARD
+  ---------
+  page_dashboard
+    -> load_summary
+    -> load_merged_csv
+
+  LOGOUT
+  ------
+  sidebar Logout
+    -> cleanup_on_logout
+    -> clear session
+
+================================================================================
+  END OF DOCUMENT
+================================================================================
+Generated for Metro Earnings Streamlit app. For run instructions see README.md.

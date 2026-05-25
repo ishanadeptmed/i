@@ -24,9 +24,8 @@ from services.files import (
     read_file_bytes,
     save_uploaded_file,
     tail_log_file,
-    load_merged_csv,
-    load_summary,
 )
+from services.files import load_merged_csv, load_summary
 
 logger = get_logger("streamlit_app")
 
@@ -95,7 +94,6 @@ def sidebar_nav() -> None:
         "preview": "Preview / download",
         "dashboard": "Dashboard",
     }
-
     choice = st.sidebar.radio(
         "Navigation",
         options=list(pages.keys()),
@@ -111,7 +109,6 @@ def sidebar_nav() -> None:
 
 def page_login() -> None:
     st.title("Login")
-
     tab_owner, tab_mgr_signup, tab_mgr_login = st.tabs(
         ["Store owner signup", "Store manager signup", "Store manager login"]
     )
@@ -131,11 +128,16 @@ def page_login() -> None:
                         st.success(msg)
                     else:
                         st.error(msg)
+                except customexception as exc:
+                    logger.exception("Owner signup UI error")
+                    st.error(str(exc))
                 except Exception as exc:
+                    logger.exception("Owner signup unexpected error")
                     st.error(format_error(exc))
 
     with tab_mgr_signup:
         st.subheader("Store manager signup")
+        st.caption("Your email must be listed by a store owner before you can sign up.")
         with st.form("manager_signup"):
             email = st.text_input("Manager email")
             password = st.text_input("Password", type="password")
@@ -147,7 +149,11 @@ def page_login() -> None:
                         st.success(msg)
                     else:
                         st.error(msg)
+                except customexception as exc:
+                    logger.exception("Manager signup UI error")
+                    st.error(str(exc))
                 except Exception as exc:
+                    logger.exception("Manager signup unexpected error")
                     st.error(format_error(exc))
 
     with tab_mgr_login:
@@ -165,19 +171,20 @@ def page_login() -> None:
                         st.rerun()
                     else:
                         st.error(msg)
+                except customexception as exc:
+                    logger.exception("Manager login UI error")
+                    st.error(str(exc))
                 except Exception as exc:
+                    logger.exception("Manager login unexpected error")
                     st.error(format_error(exc))
 
 
 def page_upload() -> None:
     st.title("Upload files")
-
     now = datetime.now()
     col_y, col_m = st.columns(2)
-
     with col_y:
         year = st.selectbox("Year", options=list(range(now.year - 2, now.year + 2)), index=2)
-
     with col_m:
         month = st.selectbox(
             "Month",
@@ -189,30 +196,41 @@ def page_upload() -> None:
     st.info(f"Files will be saved under `uploads/raw/{period_key(year, month)}/`")
 
     paths = raw_paths(year, month)
+    existing = {k: os.path.isfile(p) for k, p in paths.items()}
+    if any(existing.values()):
+        st.caption(
+            "Existing files: "
+            + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in existing.items())
+        )
 
     activation = st.file_uploader("Activation Detail Report", type=["csv"])
     cur_callidus = st.file_uploader("curCallidus Report", type=["csv"])
     callidus_detail = st.file_uploader("Callidus Detail Report", type=["csv"])
 
-    if st.button("Save uploaded files"):
+    if st.button("Save uploaded files", type="secondary"):
         try:
+            saved = 0
             uploads = {
                 "activation": activation,
                 "cur_callidus": cur_callidus,
                 "callidus_detail": callidus_detail,
             }
-            saved = 0
             for key, uploaded in uploads.items():
                 if uploaded is not None:
                     save_uploaded_file(uploaded, paths[key])
                     saved += 1
-
-            st.success(f"Saved {saved} file(s).")
-
+            if saved:
+                st.success(f"Saved {saved} file(s) for {period_key(year, month)}.")
+            else:
+                st.warning("Select at least one file to save.")
+        except customexception as exc:
+            logger.exception("Save upload failed")
+            st.error(str(exc))
         except Exception as exc:
+            logger.exception("Save upload unexpected error")
             st.error(format_error(exc))
 
-    if st.button("Process files"):
+    if st.button("Process files", type="primary"):
         try:
             ok, msg = process_period(
                 year,
@@ -224,111 +242,118 @@ def page_upload() -> None:
                 st.success(msg)
             else:
                 st.error(msg)
+        except customexception as exc:
+            logger.exception("Process UI error")
+            st.error(str(exc))
         except Exception as exc:
+            logger.exception("Process unexpected error")
             st.error(format_error(exc))
 
 
 def page_preview() -> None:
     st.title("Preview / download")
-
     try:
         periods = list_available_periods()
         if not periods:
-            st.warning("No data yet.")
+            st.warning("No data yet. Upload and process files first.")
             return
 
         period = st.selectbox("Period", periods)
 
         files = list_period_files(period)
+        if files:
+            st.subheader("Download")
+            for label, path in files:
+                data = read_file_bytes(path)
+                if data:
+                    st.download_button(
+                        label=f"Download {label}",
+                        data=data,
+                        file_name=os.path.basename(path),
+                        key=f"dl_{label}_{period}",
+                    )
 
-        st.subheader("Downloads")
-        for label, path in files:
-            data = read_file_bytes(path)
-            if data:
-                st.download_button(label, data, file_name=os.path.basename(path))
+        st.subheader("Raw previews")
+        raw_dir_files = [(l, p) for l, p in files if l.startswith("raw/")]
+        for label, path in raw_dir_files:
+            if path.endswith(".csv"):
+                try:
+                    df = pd.read_csv(path, nrows=200, encoding="latin1")
+                    st.markdown(f"**{label}**")
+                    st.dataframe(df, use_container_width=True)
+                except Exception as exc:
+                    logger.exception("Preview failed for %s", label)
+                    st.error(f"Could not preview {label}: {format_error(exc)}")
 
-        st.subheader("Processed Data")
+        st.subheader("Processed preview")
         merged = load_merged_csv(period)
         if merged is not None:
-            st.dataframe(merged.head(200))
+            st.dataframe(merged.head(200), use_container_width=True)
+        else:
+            st.info("No processed merged file for this period.")
 
         summary = load_summary(period)
         if summary:
+            st.subheader("Summary JSON")
             st.json(summary)
-
+    except customexception as exc:
+        logger.exception("Preview page error")
+        st.error(str(exc))
     except Exception as exc:
+        logger.exception("Preview page unexpected error")
         st.error(format_error(exc))
 
 
 def page_dashboard() -> None:
     st.title("Monthly earnings dashboard")
-
     try:
         periods = list_available_periods()
         proc_periods = [p for p in periods if load_summary(p) is not None]
-
         if not proc_periods:
-            st.warning("No processed data yet.")
+            st.warning("No processed data yet. Upload files and run Process on the Upload page.")
             return
 
         period = st.selectbox("Period", proc_periods)
-
         summary = load_summary(period)
         merged = load_merged_csv(period)
 
-        if not summary or merged is None:
-            st.error("Missing data.")
+        if not summary:
+            st.error("Summary not found for this period.")
             return
 
-        # KPI
         c1, c2, c3 = st.columns(3)
         c1.metric("Total compensation", f"${summary['total_compensation']:,.2f}")
         c2.metric("Activations", summary["activation_count"])
         c3.metric("Chargebacks", summary["chargeback_count"])
 
-        # =========================
-        # 1. YEAR WISE REVENUE
-        # =========================
-        st.subheader("📊 Year-wise Revenue")
+        if merged is not None and not merged.empty:
+            by_store = merged.groupby("storeid")["Compensation"].sum().reset_index()
+            st.subheader("Compensation by store")
+            st.bar_chart(by_store, x="storeid", y="Compensation")
 
-        if "year" in merged.columns:
-            yearly = merged.groupby("year", as_index=False)["Compensation"].sum()
-            st.bar_chart(yearly, x="year", y="Compensation")
+            st.subheader("Top activations by compensation")
+            top = merged.nlargest(20, "Compensation")
+            st.dataframe(top, use_container_width=True)
         else:
-            st.info("No year column available")
-
-        # =========================
-        # 2. STORE REVENUE
-        # =========================
-        st.subheader("🏬 Revenue by Store")
-
-        store_rev = (
-            merged.groupby("storeid", as_index=False)["Compensation"]
-            .sum()
-            .sort_values("Compensation", ascending=False)
-        )
-
-        st.bar_chart(store_rev, x="storeid", y="Compensation")
-
-        # =========================
-        # 3. CHARGEBACK TABLE
-        # =========================
-        st.subheader("🚨 Chargeback Serial List")
-
-        cb = merged[merged["Chargeback"].notna()]
-
-        if cb.empty:
-            st.success("No chargebacks 🎉")
-        else:
-            st.dataframe(cb[["storeid", "serial", "Compensation", "Rebate", "Chargeback"]])
-
+            by_store_records = summary.get("by_store", [])
+            if by_store_records:
+                st.subheader("Compensation by store")
+                st.bar_chart(
+                    pd.DataFrame(by_store_records),
+                    x="storeid",
+                    y="Compensation",
+                )
+        logger.info("Dashboard rendered for period %s", period)
+    except customexception as exc:
+        logger.exception("Dashboard page error")
+        st.error(str(exc))
     except Exception as exc:
+        logger.exception("Dashboard page unexpected error")
         st.error(format_error(exc))
 
 
 def main() -> None:
     logger.info("App starting")
-
     init_session()
     sidebar_nav()
 
@@ -337,7 +362,6 @@ def main() -> None:
         return
 
     page = st.session_state.get("page", "upload")
-
     if page == "upload":
         page_upload()
     elif page == "preview":
