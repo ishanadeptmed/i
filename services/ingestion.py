@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+import os
+
 from services.bootstrap import get_logger
 from Drug_EDA.exception import customexception, format_error, raise_custom
 
@@ -22,83 +24,39 @@ ACTIVATION_COLUMNS = [
 
 OUTPUT_COLUMNS = ACTIVATION_COLUMNS + ["Compensation", "Rebate", "Chargeback"]
 
-
-# def _read_csv(path: str, encoding: str = "latin1") -> pd.DataFrame:
-#     logger.debug("Reading CSV: %s (encoding=%s)", path, encoding)
-#     try:
-#         df = pd.read_csv(path, encoding=encoding)
-#         logger.info("Read %s: %d rows, %d columns", path, len(df), len(df.columns))
-#         return df
-#     except UnicodeDecodeError:
-#         logger.warning("UnicodeDecodeError for %s; detecting encoding with chardet", path)
-#         import chardet
-
-#         with open(path, "rb") as f:
-#             detected = chardet.detect(f.read())
-
-#         fallback = detected.get("encoding") or encoding
-#         logger.info("Retrying %s with encoding=%s", path, fallback)
-
-#         df = pd.read_csv(path, encoding=fallback)
-#         logger.info("Read %s: %d rows after fallback encoding", path, len(df))
-#         return df
-
-#     except Exception as exc:
-#         logger.exception("Failed to read CSV: %s", path)
-#         raise_custom(exc)
-
-def _read_file(path: str, encoding: str = "latin1") -> pd.DataFrame:
-    logger.debug("Reading file: %s", path)
-
+def _read_excel(path: str) -> pd.DataFrame:
     try:
-        ext = os.path.splitext(path)[1].lower()
+        df = pd.read_excel(path, engine="xlrd")
+        logger.info("Read %s: %d rows, %d columns", path, len(df), len(df.columns))
+        return df
+    except Exception as exc:
+        logger.exception("Failed to read Excel: %s", path)
+        raise_custom(exc)
 
-        # CSV files
-        if ext == ".csv":
-            try:
-                df = pd.read_csv(path, encoding=encoding)
 
-            except UnicodeDecodeError:
-                logger.warning(
-                    "UnicodeDecodeError for %s; detecting encoding with chardet",
-                    path,
-                )
+def _read_csv(path: str, encoding: str = "latin1") -> pd.DataFrame:
+    logger.debug("Reading CSV: %s (encoding=%s)", path, encoding)
+    try:
+        df = pd.read_csv(path, encoding=encoding)
+        logger.info("Read %s: %d rows, %d columns", path, len(df), len(df.columns))
+        return df
+    except UnicodeDecodeError:
+        logger.warning("UnicodeDecodeError for %s; detecting encoding with chardet", path)
+        import chardet
 
-                import chardet
+        with open(path, "rb") as f:
+            detected = chardet.detect(f.read())
 
-                with open(path, "rb") as f:
-                    detected = chardet.detect(f.read())
+        fallback = detected.get("encoding") or encoding
+        logger.info("Retrying %s with encoding=%s", path, fallback)
 
-                fallback = detected.get("encoding") or encoding
-
-                logger.info(
-                    "Retrying %s with encoding=%s",
-                    path,
-                    fallback,
-                )
-
-                df = pd.read_csv(path, encoding=fallback)
-
-        # Excel files (.xls / .xlsx)
-        elif ext in [".xls", ".xlsx"]:
-            df = pd.read_excel(path)
-
-        else:
-            raise ValueError(f"Unsupported file type: {ext}")
-
-        logger.info(
-            "Read %s: %d rows, %d columns",
-            path,
-            len(df),
-            len(df.columns),
-        )
-
+        df = pd.read_csv(path, encoding=fallback)
+        logger.info("Read %s: %d rows after fallback encoding", path, len(df))
         return df
 
     except Exception as exc:
-        logger.exception("Failed to read file: %s", path)
+        logger.exception("Failed to read CSV: %s", path)
         raise_custom(exc)
-
 
 def _normalize_esn(series: pd.Series) -> pd.Series:
     cleaned = series.astype(str).str.replace(r"\D", "", regex=True)
@@ -127,7 +85,7 @@ def run_ingestion(
 
     try:
         activation = _read_csv(activation_path, encoding=encoding)
-        cur_callidus = _read_csv(cur_callidus_path, encoding=encoding)
+        cur_callidus = _read_excel(cur_callidus_path)
         callidus_detail = _read_csv(callidus_detail_path, encoding=encoding)
 
         useful = activation[ACTIVATION_COLUMNS].copy()

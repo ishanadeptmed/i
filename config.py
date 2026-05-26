@@ -15,7 +15,7 @@ PROCESSED_FOLDER = os.path.join(UPLOAD_FOLDER, "processed")
 
 # Stable raw filenames per month folder
 RAW_ACTIVATION_NAME = "ActivationDetailReport.csv"
-RAW_CUR_CALLIDUS_NAME = "curCallidus.csv"
+RAW_CUR_CALLIDUS_NAME = "curCallidus.xls"
 RAW_CALLIDUS_DETAIL_NAME = "CallidusDetail.csv"
 
 PROCESSED_MERGED_NAME = "merged_activations.csv"

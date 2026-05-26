@@ -9,26 +9,61 @@ import streamlit as st
 # =========================
 # 1. Year-wise Revenue
 # =========================
+# def plot_yearly_revenue(df: pd.DataFrame, date_col: str | None = None):
+#     st.subheader("📊 1. Year-wise Revenue")
+
+#     if date_col and date_col in df.columns:
+#         df = df.copy()
+#         df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+#         df["year"] = df[date_col].dt.year
+
+#         revenue_year = (
+#             df.groupby("year", as_index=False)["Compensation"]
+#             .sum()
+#             .sort_values("year")
+#         )
+
+#         st.bar_chart(revenue_year, x="year", y="Compensation")
+
+#     else:
+#         st.warning("No valid date column provided. Showing total summary only.")
+#         st.metric("Total Revenue", float(df["Compensation"].sum()))
+
 def plot_yearly_revenue(df: pd.DataFrame, date_col: str | None = None):
     st.subheader("📊 1. Year-wise Revenue")
-
+    
     if date_col and date_col in df.columns:
-        df = df.copy()
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-        df["year"] = df[date_col].dt.year
-
-        revenue_year = (
-            df.groupby("year", as_index=False)["Compensation"]
-            .sum()
-            .sort_values("year")
-        )
-
-        st.bar_chart(revenue_year, x="year", y="Compensation")
-
+        try:
+            df = df.copy()
+            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+            df["year"] = df[date_col].dt.year
+            
+            # Remove rows without valid year
+            df_valid = df[df["year"].notna()]
+            
+            if df_valid.empty:
+                st.warning("Could not extract years from date column.")
+                st.metric("Total Revenue", float(df["Compensation"].sum()))
+                return
+            
+            revenue_year = (
+                df_valid.groupby("year", as_index=False)["Compensation"]
+                .sum()
+                .sort_values("year")
+            )
+            
+            if len(revenue_year) > 0:
+                st.bar_chart(revenue_year, x="year", y="Compensation")
+            else:
+                st.warning("No revenue data grouped by year.")
+                st.metric("Total Revenue", float(df["Compensation"].sum()))
+                
+        except Exception as e:
+            st.error(f"Error processing dates: {str(e)}")
+            st.metric("Total Revenue", float(df["Compensation"].sum()))
     else:
         st.warning("No valid date column provided. Showing total summary only.")
         st.metric("Total Revenue", float(df["Compensation"].sum()))
-
 
 # =========================
 # 2. Revenue by Store
